@@ -62,3 +62,7 @@ bun run dev
 ```
 
 Additional development guidance is available in [website/docs/development/development.md](website/docs/development/development.md).
+
+## Website (documentation site)
+
+The documentation site in `website/` uses its own Node/Yarn toolchain (the dashboard in `ui/` uses Bun). See [website/README.md](website/README.md) for prerequisites, the local preview, and the production build.
