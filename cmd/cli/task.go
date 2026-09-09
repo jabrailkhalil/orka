@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -523,6 +524,9 @@ func newTaskWaitCmd() *cobra.Command {
 		Short: "Wait for a task to complete",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+
 			var deadline <-chan time.Time
 			if timeout != "" {
 				d, err := time.ParseDuration(timeout)
@@ -530,10 +534,13 @@ func newTaskWaitCmd() *cobra.Command {
 					return fmt.Errorf("invalid timeout: %w", err)
 				}
 				deadline = time.After(d)
+				// Derive the polling context from the deadline so an expired
+				// wait also cancels an in-flight status request instead of
+				// accepting a late success.
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, d)
+				defer cancel()
 			}
-
-			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-			defer cancel()
 
 			c := newClientFromCmd(cmd)
 			return waitForTaskPhase(
@@ -571,7 +578,7 @@ func waitForTaskPhase(
 		phase, err := getPhase(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return waitContextError(ctx, taskName)
 			}
 			return err
 		}
@@ -585,12 +592,21 @@ func waitForTaskPhase(
 
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return waitContextError(ctx, taskName)
 		case <-deadline:
 			return fmt.Errorf("timed out waiting for task %s", taskName)
 		case <-ticker.C:
 		}
 	}
+}
+
+// waitContextError maps the polling context's terminal state to the same
+// user-facing errors a deadline without request cancellation would produce.
+func waitContextError(ctx context.Context, taskName string) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("timed out waiting for task %s", taskName)
+	}
+	return ctx.Err()
 }
 
 func newTaskDeleteCmd() *cobra.Command {
