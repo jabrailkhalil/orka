@@ -5,7 +5,7 @@ interface DiffViewerProps {
 }
 
 interface DiffLine {
-  type: 'addition' | 'deletion' | 'context' | 'hunk-header' | 'file-header'
+  type: 'addition' | 'deletion' | 'context' | 'hunk-header' | 'file-header' | 'metadata'
   content: string
   oldLine?: number
   newLine?: number
@@ -33,10 +33,17 @@ function parseDiff(diff: string): DiffLine[] {
     } else if (line.startsWith('-')) {
       result.push({ type: 'deletion', content: line, oldLine })
       oldLine++
-    } else {
+    } else if (line.startsWith(' ')) {
       result.push({ type: 'context', content: line, oldLine, newLine })
       oldLine++
       newLine++
+    } else {
+      // Metadata such as "\ No newline at end of file" and "index ..." rows:
+      // keep them visible, but never assign source line numbers or advance
+      // counters. The empty item produced by a trailing patch newline is
+      // dropped entirely.
+      if (line === '') continue
+      result.push({ type: 'metadata', content: line })
     }
   }
 
@@ -49,6 +56,7 @@ const lineStyles: Record<DiffLine['type'], string> = {
   'hunk-header': 'bg-status-running-bg text-status-running',
   'file-header': 'bg-muted font-semibold',
   context: '',
+  metadata: '',
 }
 
 export function DiffViewer({ diff }: DiffViewerProps) {
