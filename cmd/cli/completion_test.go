@@ -92,7 +92,7 @@ func TestCLIFlagCompletion(t *testing.T) {
 			}
 
 			var gotLines []string
-			for _, line := range strings.Split(strings.TrimRight(out.String(), "\n"), "\n") {
+			for line := range strings.SplitSeq(strings.TrimRight(out.String(), "\n"), "\n") {
 				if strings.TrimSpace(line) != "" {
 					gotLines = append(gotLines, line)
 				}
