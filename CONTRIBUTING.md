@@ -61,4 +61,14 @@ bun install
 bun run dev
 ```
 
+Using the devcontainer: the container setup installs Bun, so a rebuilt container can run the UI workflow directly. After changing `.devcontainer/post-install.sh`, rebuild with **Dev Containers: Rebuild Container**; the dashboard checks are the same commands used by CI:
+
+```bash
+cd ui
+bun install --frozen-lockfile
+bun run lint
+bun run test
+bun run build
+```
+
 Additional development guidance is available in [website/docs/development/development.md](website/docs/development/development.md).

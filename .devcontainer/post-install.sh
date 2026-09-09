@@ -5,6 +5,26 @@ echo "Installing Kubebuilder development tools..."
 
 ARCH=$(go env GOARCH)
 
+# Install Bun (pinned to the version used by the UI test job)
+PINNED_BUN_VERSION="1.3.13"
+if ! command -v bun &> /dev/null || [ "$(bun --version)" != "${PINNED_BUN_VERSION}" ]; then
+  BUN_ARCH=x64
+  if [ "${ARCH}" = "arm64" ]; then
+    BUN_ARCH=aarch64
+  fi
+  if ! command -v unzip &> /dev/null; then
+    apt-get update >/dev/null
+    apt-get install -y --no-install-recommends unzip >/dev/null
+  fi
+  echo "Installing Bun ${PINNED_BUN_VERSION} (linux-${BUN_ARCH})..."
+  curl -fsSL "https://github.com/oven-sh/bun/releases/download/bun-v${PINNED_BUN_VERSION}/bun-linux-${BUN_ARCH}.zip" -o /tmp/bun.zip \
+    || { echo "ERROR: failed to download Bun ${PINNED_BUN_VERSION} for linux-${BUN_ARCH}" >&2; exit 1; }
+  unzip -o /tmp/bun.zip -d /usr/local
+  chmod +x "/usr/local/bun-linux-${BUN_ARCH}/bun"
+  ln -sf "/usr/local/bun-linux-${BUN_ARCH}/bun" /usr/local/bin/bun
+  rm -f /tmp/bun.zip
+fi
+
 # Install kind
 if ! command -v kind &> /dev/null; then
   curl -Lo ./kind "https://kind.sigs.k8s.io/dl/latest/kind-linux-${ARCH}"
@@ -43,6 +63,7 @@ docker network inspect kind >/dev/null 2>&1 || docker network create kind || tru
 
 # Verify installations
 echo "Installed versions:"
+bun --version
 kind version
 kubebuilder version
 kubectl version --client
