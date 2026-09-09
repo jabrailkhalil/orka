@@ -41,7 +41,7 @@ func newTaskArtifactsCmd() *cobra.Command {
 			}
 
 			if len(artifacts) == 0 {
-				fmt.Fprintln(cmd.OutOrStdout(), "No artifacts found.")
+				fmt.Fprintln(cmd.OutOrStdout(), "No artifacts found.") //nolint:errcheck
 				return nil
 			}
 
