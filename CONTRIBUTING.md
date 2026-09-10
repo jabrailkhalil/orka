@@ -61,7 +61,7 @@ bun install
 bun run dev
 ```
 
-Using the devcontainer: the container setup installs Bun, so a rebuilt container can run the UI workflow directly. After changing `.devcontainer/post-install.sh`, rebuild with **Dev Containers: Rebuild Container**; the dashboard checks are the same commands used by CI:
+Using the devcontainer: the container setup installs Bun and Node.js, which the UI test runner requires. After changing files in `.devcontainer/`, rebuild with **Dev Containers: Rebuild Container**; the dashboard checks are the same commands used by CI:
 
 ```bash
 cd ui
