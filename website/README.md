@@ -5,7 +5,9 @@ This directory contains the public Orka documentation site (Docusaurus). Do not 
 ## Prerequisites
 
 - Node.js (the website CI uses Node.js 24)
-- Corepack, which ships with recent Node.js distributions
+- Corepack
+
+If `corepack --version` is unavailable, install it with `npm install --global corepack` first. [Node.js 25 and later no longer bundle Corepack](https://github.com/nodejs/corepack#how-to-install).
 
 Enable Yarn through Corepack so the repository-pinned version is used:
 
