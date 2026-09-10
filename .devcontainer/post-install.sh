@@ -7,11 +7,18 @@ ARCH=$(go env GOARCH)
 
 # Install Bun (pinned to the version used by the UI test job)
 PINNED_BUN_VERSION="1.3.13"
-if ! command -v bun &> /dev/null || [ "$(bun --version)" != "${PINNED_BUN_VERSION}" ]; then
-  BUN_ARCH=x64
-  if [ "${ARCH}" = "arm64" ]; then
-    BUN_ARCH=aarch64
-  fi
+BUN_PATH=$(type -P bun || true)
+if [ -z "${BUN_PATH}" ] || [ "$(bun --version)" != "${PINNED_BUN_VERSION}" ]; then
+  case "${ARCH}" in
+    amd64)
+      BUN_ARCH=x64
+      if ! grep -qw avx2 /proc/cpuinfo; then
+        BUN_ARCH=x64-baseline
+      fi
+      ;;
+    arm64) BUN_ARCH=aarch64 ;;
+    *) echo "ERROR: Bun is not supported on linux-${ARCH}" >&2; exit 1 ;;
+  esac
   if ! command -v unzip &> /dev/null; then
     apt-get update >/dev/null
     apt-get install -y --no-install-recommends unzip >/dev/null
@@ -22,7 +29,15 @@ if ! command -v bun &> /dev/null || [ "$(bun --version)" != "${PINNED_BUN_VERSIO
   unzip -o /tmp/bun.zip -d /usr/local
   chmod +x "/usr/local/bun-linux-${BUN_ARCH}/bun"
   ln -sf "/usr/local/bun-linux-${BUN_ARCH}/bun" /usr/local/bin/bun
+  # Keep an existing Bun earlier on PATH pinned in subsequent shells too.
+  if [ -n "${BUN_PATH}" ] && ! [ "${BUN_PATH}" -ef /usr/local/bin/bun ]; then
+    ln -sf /usr/local/bin/bun "${BUN_PATH}"
+  fi
   rm -f /tmp/bun.zip
+fi
+if [ "$(bun --version)" != "${PINNED_BUN_VERSION}" ]; then
+  echo "ERROR: Bun ${PINNED_BUN_VERSION} is not the active version on PATH" >&2
+  exit 1
 fi
 
 # Install kind
