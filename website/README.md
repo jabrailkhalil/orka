@@ -32,7 +32,9 @@ The development server prints a local address, normally `http://127.0.0.1:3000/o
 
 ## Edit pages
 
-Documentation sources live in `website/docs/`; Docusaurus routes them by filename under the base path. The page navigation is defined in `website/sidebars.js`.
+Documentation sources live in `website/docs/`. Their URLs start with `/orka/docs/`, combining `baseUrl` and `routeBasePath` from `website/docusaurus.config.js`. A page's front-matter `slug` sets its path within that prefix; without a `slug`, Docusaurus derives the path from the source file path. For example, `website/docs/reference/cli.md` declares `slug: /cli-reference`, so its preview URL is `http://127.0.0.1:3000/orka/docs/cli-reference`.
+
+The page navigation is defined in `website/sidebars.js`.
 
 - To change an existing page, edit its Markdown file under `website/docs/` and inspect it in the running preview.
 - To add a new page, create the Markdown file under `website/docs/` and add it to the relevant sidebar entry in `website/sidebars.js`.
