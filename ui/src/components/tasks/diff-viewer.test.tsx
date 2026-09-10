@@ -112,4 +112,71 @@ index 489ce0f..3e5126c 100644
     expect(byContent[' thirteen']).toMatchObject({ old: '14', new: '14' })
     expect(byContent['\\ No newline at end of file']).toMatchObject({ old: '', new: '' })
   })
+
+  it('numbers and styles source lines that resemble file headers', () => {
+    const patch = `diff --git a/old.txt b/new.txt
+index 7a6cea4..49e2be3 100644
+--- a/old.txt
++++ b/new.txt
+@@ -1,4 +1,4 @@
+ heading
+--- old marker
+-old payload
++++ new marker
++new payload
+ tail
+`
+    render(<DiffViewer diff={patch} />)
+    const row = (content: string) => screen.getByText(content, { exact: true }).parentElement!
+    const numbers = (content: string) => Array.from(row(content).querySelectorAll('span')).slice(0, 2).map((cell) => cell.textContent)
+
+    expect(numbers('--- old marker')).toEqual(['2', ''])
+    expect(row('--- old marker')).toHaveClass('bg-status-failed-bg')
+    expect(numbers('+++ new marker')).toEqual(['', '2'])
+    expect(row('+++ new marker')).toHaveClass('bg-status-succeeded-bg')
+    expect(numbers('-old payload')).toEqual(['3', ''])
+    expect(numbers('+new payload')).toEqual(['', '3'])
+    expect(numbers('tail')).toEqual(['4', '4'])
+    expect(numbers('--- a/old.txt')).toEqual(['', ''])
+    expect(numbers('+++ b/new.txt')).toEqual(['', ''])
+  })
+
+  it('recognizes headers between complete hunks with implicit and zero line counts', () => {
+    const patch = `--- a/changed.txt
++++ b/changed.txt
+@@ -1 +1 @@
+--- removed marker
+\\ No newline at end of file
++++ added marker
+\\ No newline at end of file
+--- /dev/null
++++ b/added.txt
+@@ -0,0 +1,2 @@
++++ first addition
++second addition
+--- a/deleted.txt
++++ /dev/null
+@@ -3,2 +0,0 @@
+--- first deletion
+-second deletion
+`
+    render(<DiffViewer diff={patch} />)
+    const row = (content: string) => screen.getByText(content, { exact: true }).parentElement!
+    const numbers = (content: string) => Array.from(row(content).querySelectorAll('span')).slice(0, 2).map((cell) => cell.textContent)
+
+    expect(numbers('--- removed marker')).toEqual(['1', ''])
+    expect(numbers('+++ added marker')).toEqual(['', '1'])
+    expect(numbers('+++ first addition')).toEqual(['', '1'])
+    expect(numbers('+second addition')).toEqual(['', '2'])
+    expect(numbers('--- first deletion')).toEqual(['3', ''])
+    expect(numbers('-second deletion')).toEqual(['4', ''])
+    for (const header of ['--- /dev/null', '+++ b/added.txt', '--- a/deleted.txt', '+++ /dev/null']) {
+      expect(numbers(header)).toEqual(['', ''])
+      expect(row(header)).toHaveClass('font-semibold')
+    }
+    for (const marker of screen.getAllByText('\\ No newline at end of file', { exact: true })) {
+      const spans = marker.parentElement!.querySelectorAll('span')
+      expect([spans[0].textContent, spans[1].textContent]).toEqual(['', ''])
+    }
+  })
 })
