@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -39,20 +41,32 @@ func runTaskWait(t *testing.T, srv *httptest.Server, extraArgs ...string) error 
 }
 
 func TestTaskWaitDeadlineDuringRequest(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	requestStarted := make(chan struct{})
 	requestCanceled := make(chan struct{})
+	shutdown := make(chan struct{})
 	var once sync.Once
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		once.Do(func() { close(requestStarted) })
-		<-r.Context().Done()
-		close(requestCanceled)
+		select {
+		case <-r.Context().Done():
+			close(requestCanceled)
+		case <-shutdown:
+		}
 	}))
-	defer srv.Close()
+	defer func() {
+		close(shutdown)
+		srv.Close()
+	}()
+
+	root := newRootCmd()
+	root.SetOut(io.Discard)
+	root.SetArgs([]string{"task", "wait", "example-task", "--server", srv.URL, "--timeout", "2s"})
 
 	resultCh := make(chan error, 1)
 	go func() {
-		resultCh <- runTaskWait(t, srv, "--timeout", "50ms")
+		resultCh <- root.Execute()
 	}()
 
 	select {
@@ -75,6 +89,26 @@ func TestTaskWaitDeadlineDuringRequest(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("in-flight status request was not canceled by the deadline")
 	}
+}
+
+func TestWaitForTaskPhaseRejectsLateSuccess(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		var out strings.Builder
+
+		err := waitForTaskPhase(ctx, "example-task", time.Millisecond, func(context.Context) (string, error) {
+			// A response can finish decoding after its request deadline expires.
+			time.Sleep(2 * time.Second)
+			return "Succeeded", nil
+		}, &out)
+		if err == nil || !strings.Contains(err.Error(), "timed out waiting for task example-task") {
+			t.Fatalf("wait error = %v, want timed out waiting for task example-task", err)
+		}
+		if out.Len() != 0 {
+			t.Fatalf("wait output = %q, want no success message", out.String())
+		}
+	})
 }
 
 func TestTaskWaitDeadlineBetweenPolls(t *testing.T) {

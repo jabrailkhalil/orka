@@ -527,16 +527,12 @@ func newTaskWaitCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 
-			var deadline <-chan time.Time
 			if timeout != "" {
 				d, err := time.ParseDuration(timeout)
 				if err != nil {
 					return fmt.Errorf("invalid timeout: %w", err)
 				}
-				deadline = time.After(d)
-				// Derive the polling context from the deadline so an expired
-				// wait also cancels an in-flight status request instead of
-				// accepting a late success.
+				// One context deadline stops polling and cancels in-flight requests.
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithTimeout(ctx, d)
 				defer cancel()
@@ -546,7 +542,6 @@ func newTaskWaitCmd() *cobra.Command {
 			return waitForTaskPhase(
 				ctx,
 				args[0],
-				deadline,
 				2*time.Second,
 				func(ctx context.Context) (string, error) {
 					detail, err := c.GetTask(ctx, args[0], client.GetOptions{Namespace: c.Namespace})
@@ -566,7 +561,6 @@ func newTaskWaitCmd() *cobra.Command {
 func waitForTaskPhase(
 	ctx context.Context,
 	taskName string,
-	deadline <-chan time.Time,
 	pollInterval time.Duration,
 	getPhase func(context.Context) (string, error),
 	out io.Writer,
@@ -576,10 +570,10 @@ func waitForTaskPhase(
 
 	for {
 		phase, err := getPhase(ctx)
+		if ctx.Err() != nil {
+			return waitContextError(ctx, taskName)
+		}
 		if err != nil {
-			if ctx.Err() != nil {
-				return waitContextError(ctx, taskName)
-			}
 			return err
 		}
 		switch strings.ToLower(phase) {
@@ -593,8 +587,6 @@ func waitForTaskPhase(
 		select {
 		case <-ctx.Done():
 			return waitContextError(ctx, taskName)
-		case <-deadline:
-			return fmt.Errorf("timed out waiting for task %s", taskName)
 		case <-ticker.C:
 		}
 	}
