@@ -897,20 +897,22 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 		outcome = acp.SelectedPermissionOutcome(request.Decision.OptionID)
 		optionKind := permission.options[request.Decision.OptionID]
 		if optionKind == harnessv2.PermissionOptionAllowOnce || optionKind == harnessv2.PermissionOptionAllowAlways {
-			if state.mcpProxy == nil {
+			if state.mcpProxy == nil || !permission.expiresAt.After(now) {
 				s.mu.Unlock()
-				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission cannot authorize an MCP tool", nil, false)
+				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission has no prompt tool authority", nil, false)
 				return
 			}
-			toolName, resolveErr := state.mcpProxy.resolveApprovalToolName(permission.toolName, permission.title)
-			if resolveErr != nil {
+			requiresApproval, resolveErr := state.mcpProxy.permissionRequiresApproval(state.profile.ProviderKind, request.Metadata.PromptID, permission.toolName, now)
+			if resolveErr != nil || (!requiresApproval && optionKind != harnessv2.PermissionOptionAllowOnce) {
 				s.mu.Unlock()
-				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission cannot authorize an MCP tool", nil, false)
+				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission cannot authorize the tool", nil, false)
 				return
 			}
-			approval = &harnessv2.MCPApprovalEvidence{
-				PermissionRequestID: request.RequestID, ToolCallID: permission.toolCallID, ToolName: toolName,
-				GrantedAt: now, ExpiresAt: permission.expiresAt, Reusable: optionKind == harnessv2.PermissionOptionAllowAlways,
+			if requiresApproval {
+				approval = &harnessv2.MCPApprovalEvidence{
+					PermissionRequestID: request.RequestID, ToolCallID: permission.toolCallID, ToolName: permission.toolName,
+					GrantedAt: now, ExpiresAt: permission.expiresAt, Reusable: optionKind == harnessv2.PermissionOptionAllowAlways,
+				}
 			}
 		}
 	}
@@ -1399,7 +1401,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "runtime descendant cleanup could not be proven", nil, false)
 		return
 	}
-	if err := acp.ReclaimSessionOwnership(state.paths.Root); err != nil {
+	if err := reclaimStoppedSessionOwnership(state.paths); err != nil {
 		slog.Error("ACP runtime session deletion failed", "stage", "ownership reclaim")
 		s.poisonPool("session_root_ownership_reclaim_unproven")
 		s.mu.Lock()
@@ -2102,6 +2104,9 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		state.descriptor.LastTransitionAt = event.Timestamp
 		return &harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity, Accepted: &harnessv2.AcceptedEvent{AcceptedAt: event.Timestamp, Lease: prompt.lease, ACPVersion: harnessv2.ACPProfileV1}}, nil
 	case acp.PromptEventUpdate:
+		if err := prompt.rememberToolCallName(event.Update); err != nil {
+			return nil, err
+		}
 		update, text, ok, err := mapACPUpdate(event.Update)
 		if err != nil {
 			prompt.sequence--
@@ -2123,9 +2128,18 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		}
 		return mapped, nil
 	case acp.PromptEventPermissionRequested:
-		permission, err := mapPermission(event.Permission, event.Timestamp, defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout))
+		permission, err := mapPermission(event.Permission, event.Timestamp, defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout), state.profile.ProviderKind)
 		if err != nil {
 			return nil, err
+		}
+		if name, known := prompt.toolCallNames[permission.ToolCallID]; known {
+			if permission.ToolName != "" && permission.ToolName != name {
+				return nil, fmt.Errorf("ACP permission does not match the recorded tool identity")
+			}
+			permission.ToolName = name
+		}
+		if state.mcpProxy != nil {
+			permission.ToolName = canonicalPermissionToolName(state.profile.ProviderKind, state.mcpProxy.configuration.ToolPolicy, permission.ToolName)
 		}
 		if prompt.permissionRequestIDs == nil {
 			prompt.permissionRequestIDs = make(map[harnessv2.PermissionRequestID]struct{})
@@ -2671,6 +2685,19 @@ func pathMatchesPermission(r *http.Request, request harnessv2.ResolvePermissionR
 func sessionWorkspaceOutsideRoot(paths acp.SessionPaths) bool {
 	root := strings.TrimSuffix(paths.Root, "/")
 	return paths.Workspace != root && !strings.HasPrefix(paths.Workspace, root+"/")
+}
+
+// reclaimStoppedSessionOwnership runs only after descendant termination is
+// proven. Durable data survives session deletion, but must return to the
+// supervisor identity so the provider can checkpoint and clean up its tree.
+func reclaimStoppedSessionOwnership(paths acp.SessionPaths) error {
+	if err := acp.ReclaimSessionOwnership(paths.Root); err != nil {
+		return err
+	}
+	if sessionWorkspaceOutsideRoot(paths) {
+		return acp.ReclaimSessionOwnership(paths.Workspace)
+	}
+	return nil
 }
 
 func errorString(err error) string {

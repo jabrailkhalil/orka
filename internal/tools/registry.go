@@ -16,6 +16,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/llm"
@@ -45,6 +46,13 @@ type MemoryProposalWriter interface {
 // search_transcript.
 type TranscriptSearcher interface {
 	SearchTranscript(context.Context, store.TranscriptSearchFilter) ([]store.TranscriptSearchResult, error)
+}
+
+// TaskMessageStore exposes only message send and inbox access to tools.
+// Brokered contexts must supply an implementation bound to the authenticated Task.
+type TaskMessageStore interface {
+	SendMessage(context.Context, *store.Message) error
+	GetMessages(context.Context, string, string, string, bool) ([]store.Message, error)
 }
 
 // ToolContext provides dependencies for tools that need K8s client access or other services.
@@ -92,7 +100,7 @@ type ToolContext struct {
 		GetResult(ctx context.Context, namespace, taskName string) ([]byte, error)
 	}
 	// MessageStore for inter-agent messaging when tools execute in-process from the controller broker.
-	MessageStore store.MessageStore
+	MessageStore TaskMessageStore
 	// SessionDeleter for deleting sessions (controller.SessionManager)
 	SessionDeleter interface {
 		DeleteSession(ctx context.Context, namespace, sessionID string) error
@@ -647,7 +655,9 @@ func RegisterBrokeredCoordinationTools(r *Registry, k8sClient client.Client) err
 		return fmt.Errorf("brokered coordination tools require a Kubernetes client")
 	}
 	r.Register(NewDelegateTaskTool(k8sClient))
-	r.Register(NewWaitForTasksTool(k8sClient))
+	// MCP clients have shorter request deadlines than native worker tool calls.
+	// Keep each brokered poll bounded even when a model omits or exceeds timeout.
+	r.Register(&WaitForTasksTool{k8sClient: k8sClient, maxWait: RepositoryValidationWaitTimeout})
 	r.Register(NewRunValidationTool(k8sClient))
 	r.Register(NewSendMessageTool())
 	r.Register(NewCheckMessagesTool())
@@ -751,32 +761,7 @@ func ChatToolNames() []string {
 // CoordinationToolNames returns the names of all coordination tools registered by
 // RegisterCoordinationTools in worker processes.
 func CoordinationToolNames() []string {
-	return []string{
-		delegateTaskToolName,
-		waitForTasksToolName,
-		createContainerTaskToolName,
-		cancelTaskToolName,
-		sendMessageToolName,
-		checkMessagesToolName,
-		createPullRequestToolName,
-		checkPullRequestCIToolName,
-		mergePullRequestToolName,
-		autoMergePullRequestToolName,
-		reviewPullRequestToolName,
-		postReviewCommentToolName,
-		checkPRReviewMarkerToolName,
-		listIssuesToolName,
-		listPullRequestsToolName,
-		getIssueToolName,
-		commentOnIssueToolName,
-		createAgentToolName,
-		deleteAgentToolName,
-		updatePlanToolName,
-		"recall_memory",
-		"remember",
-		"propose_memory",
-		"search_transcript",
-	}
+	return aitools.CoordinationToolNames()
 }
 
 func init() {

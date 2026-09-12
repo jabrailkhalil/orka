@@ -66,6 +66,7 @@ const (
 	EnvProviderTokenBootstrap    = "ORKA_ACP_PROVIDER_TOKEN_BOOTSTRAP"
 	EnvSessionBaseDir            = "ORKA_ACP_SESSION_BASE_DIR"
 	EnvDurableWorkspaceDir       = "ORKA_ACP_DURABLE_WORKSPACE_DIR"
+	EnvDurableWorkspaceKey       = "ORKA_ACP_DURABLE_WORKSPACE_KEY"
 	EnvFirstSessionUID           = "ORKA_ACP_FIRST_SESSION_UID"
 	EnvLastSessionUID            = "ORKA_ACP_LAST_SESSION_UID"
 	EnvSessionGID                = "ORKA_ACP_SESSION_GID"
@@ -146,6 +147,13 @@ func LoadConfigFromEnv() (Config, error) {
 		return Config{}, err
 	}
 	limits := defaultProtocolLimits(providerKind)
+	durableWorkspaceKey := strings.TrimSpace(os.Getenv(EnvDurableWorkspaceKey))
+	if durableWorkspaceKey != "" {
+		// A stable data key belongs to one dedicated workspace. Enforce its
+		// single-session capacity in the supervisor as well as the controller.
+		limits.MaxResidentSessions = 1
+		limits.MaxConcurrentPrompts = 1
+	}
 	controllerEpoch, err := parsePositiveUint(EnvControllerEpoch, requiredEnv(EnvControllerEpoch))
 	if err != nil {
 		return Config{}, err
@@ -264,6 +272,7 @@ func LoadConfigFromEnv() (Config, error) {
 		ControllerBearerToken: controllerToken, CapabilitySecret: []byte(capabilitySecret), RequireCapabilities: true,
 		SessionBaseDir:      envDefault(EnvSessionBaseDir, "/sessions"),
 		DurableWorkspaceDir: durableWorkspaceDir,
+		DurableWorkspaceKey: durableWorkspaceKey,
 		UIDAllocator:        allocator,
 		ProviderProxy: ProviderProxyConfig{
 			UpstreamBaseURL: providerUpstreamBaseURL(providerKind, providerBaseURL), UpstreamBearerToken: providerToken,
@@ -345,6 +354,9 @@ func providerSessionPolicy(
 	}
 	toolPolicy := request.MCPConfiguration.ToolPolicy
 	unrestricted := toolPolicy.AllowedToolNames == nil && len(toolPolicy.DisallowedToolNames) == 0 && toolPolicy.AllowBash
+	if provider == providerKindCodex || provider == providerKindCopilot {
+		unrestricted = acp.BuiltInRuntimeNativePolicyUnrestricted(provider, toolPolicy.AllowedToolNames, toolPolicy.DisallowedToolNames, toolPolicy.AllowBash)
+	}
 	policy := providerNativePolicy{unrestricted: unrestricted, allowed: make(map[string]struct{}, len(providerNativeToolNames))}
 	for _, descriptor := range toolPolicy.Tools {
 		if descriptor.Source != harnessv2.MCPToolSourceProviderNative {
@@ -556,10 +568,30 @@ func copilotSessionProjection(
 			excluded = append(excluded, copilotToolIDs[name]...)
 		}
 	}
+	args := []string{"--excluded-tools=" + strings.Join(excluded, ",")}
+	// Copilot 1.0.77 supplies display titles, not structured tool names, in
+	// permission requests. Project the frozen native grants into CLI permission
+	// rules instead of treating those titles as authority. Exclusions above
+	// still remove every native tool outside the effective policy.
+	if policy.unrestricted || policy.allows(providerToolBash) {
+		args = append(args, "--allow-tool=shell")
+	}
+	if policy.unrestricted || policy.allows(providerToolEdit) || policy.allows(providerToolWrite) {
+		args = append(args, "--allow-tool=write")
+	}
+	for _, descriptor := range request.MCPConfiguration.ToolPolicy.Tools {
+		if descriptor.Source.Brokered() {
+			// This grants access only to the configured Orka MCP server. The
+			// proxy checks each call against its prompt grant and independently
+			// requires Orka approval evidence for approval-required tools.
+			args = append(args, "--allow-tool=orka")
+			break
+		}
+	}
 	// The CLI reports the exclusion list back as "Info:" agent message chunks
 	// at prompt start; the filter withholds exactly those chunks.
 	return ProviderSessionProjection{
-		AdditionalArgs:        []string{"--excluded-tools=" + strings.Join(excluded, ",")},
+		AdditionalArgs:        args,
 		AgentDiagnosticFilter: &AgentDiagnosticFilter{Startup: copilotStartupDiagnostic(excluded)},
 	}, nil
 }

@@ -485,11 +485,7 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 			if err := validateRepositoryMonitorValidationCleanupIdentity(monitor, reviewTask, current); err != nil {
 				return err
 			}
-			now := metav1.Now()
-			current.Status.Phase = corev1alpha1.TaskPhaseCancelled
-			current.Status.CompletionTime = &now
-			current.Status.Message = "parent review ended before repository validation completed"
-			return r.Status().Update(ctx, current)
+			return r.cancelRepositoryMonitorTask(ctx, current, "parent review ended before repository validation completed")
 		}); err != nil {
 			return false, err
 		}
@@ -745,14 +741,31 @@ func repositoryMonitorReviewJSONPayload(raw string) (string, error) {
 	if json.Valid([]byte(raw)) {
 		return raw, nil
 	}
-	payload, ok := firstJSONObject(raw)
-	if !ok {
-		return "", fmt.Errorf("review result does not contain a JSON object")
+	// ACP results can include earlier commentary containing code braces or
+	// diagnostic objects. Select the review by its schema, without choosing
+	// between multiple review results or accepting nested example objects.
+	var reviewPayload string
+	for {
+		payload, ok := firstJSONObject(raw)
+		if !ok {
+			break
+		}
+		raw = raw[strings.IndexByte(raw, '{')+len(payload):]
+		var header struct {
+			SchemaVersion string `json:"schemaVersion"`
+		}
+		if err := json.Unmarshal([]byte(payload), &header); err != nil || header.SchemaVersion != repositoryMonitorReviewSchemaVersion {
+			continue
+		}
+		if reviewPayload != "" {
+			return "", fmt.Errorf("review result contains multiple JSON review objects")
+		}
+		reviewPayload = payload
 	}
-	if !json.Valid([]byte(payload)) {
-		return "", fmt.Errorf("review result JSON object is invalid")
+	if reviewPayload == "" {
+		return "", fmt.Errorf("review result does not contain a JSON review object")
 	}
-	return payload, nil
+	return reviewPayload, nil
 }
 
 func firstJSONObject(raw string) (string, bool) {

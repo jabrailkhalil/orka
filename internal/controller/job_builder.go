@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
@@ -331,6 +332,14 @@ func applyRepositoryMonitorValidationDefaultTolerations(spec *corev1.PodSpec) {
 			TolerationSeconds: new(seconds),
 		})
 	}
+	// Validation workers use non-BestEffort resources. Render the toleration
+	// Kubernetes adds for that QoS class so the admitted Pod still matches exactly.
+	memoryPressure := corev1.Toleration{
+		Key: corev1.TaintNodeMemoryPressure, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule,
+	}
+	if !slices.Contains(spec.Tolerations, memoryPressure) {
+		spec.Tolerations = append(spec.Tolerations, memoryPressure)
+	}
 }
 
 func repositoryMonitorValidationToleratesNoExecute(tolerations []corev1.Toleration, key string) bool {
@@ -611,7 +620,9 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 					repositoryMonitorValidationShellWrapper,
 					path.Join(repositoryMonitorValidationCommandMount, repositoryMonitorValidationCommandFile),
 				}
-				container.TerminationMessagePath = "/dev/null"
+				// Kubelet mounts a regular file here. Mounting it over /dev/null
+				// replaces the device and prevents the container runtime from starting.
+				container.TerminationMessagePath = corev1.TerminationMessagePathDefault
 				container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
 			}
 		} else {
@@ -964,6 +975,8 @@ func setTransactionCredentialAuthorizationEnv(
 type aiConfig struct {
 	providerType    string
 	model           string
+	temperature     string
+	maxTokens       string
 	prompt          string
 	systemPrompt    string
 	baseURL         string
@@ -993,6 +1006,12 @@ func resolveAIConfig(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provide
 			}
 			if agent.Spec.Model.Name != "" {
 				cfg.model = agent.Spec.Model.Name
+			}
+			if agent.Spec.Model.Temperature != nil {
+				cfg.temperature = strconv.FormatFloat(*agent.Spec.Model.Temperature, 'f', -1, 64)
+			}
+			if agent.Spec.Model.MaxTokens != nil {
+				cfg.maxTokens = strconv.FormatInt(int64(*agent.Spec.Model.MaxTokens), 10)
 			}
 		}
 		if agent.Spec.SystemPrompt != nil {
@@ -1076,74 +1095,42 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 		cfg.systemPrompt = b.resolveConfigMapValue(ctx, agent.Namespace, agent.Spec.SystemPrompt.ConfigMapRef)
 	}
 
-	envVars = append(envVars, workerenv.AIWorkerEnv{
+	for _, envVar := range (workerenv.AIWorkerEnv{
 		Provider:        cfg.providerType,
 		Model:           cfg.model,
+		Temperature:     cfg.temperature,
+		MaxTokens:       cfg.maxTokens,
 		Prompt:          cfg.prompt,
 		SystemPrompt:    cfg.systemPrompt,
 		BaseURL:         cfg.baseURL,
 		AzureAPIVersion: cfg.azureAPIVersion,
 		ControllerMode:  string(b.ControllerMode),
-	}.EnvVars()...)
-
-	disableCoordinationToolInjection := task.Annotations[labels.AnnotationDisableCoordinationToolInject] == scheduledRunLabelValue
-
-	// Auto-inject coordination tools when coordination is enabled, unless the
-	// task deliberately supplies a narrower explicit tool set.
-	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled && !disableCoordinationToolInjection {
-		for _, ct := range []string{
-			"delegate_task",
-			"wait_for_tasks",
-			"create_container_task",
-			"cancel_task",
-			"send_message",
-			"check_messages",
-			"recall_memory",
-			"remember",
-			"propose_memory",
-			"search_transcript",
-			"create_pull_request",
-			"list_pull_requests",
-			"check_pr_review_marker",
-			"check_pull_request_ci",
-			"merge_pull_request",
-			"auto_merge_pull_request",
-			"review_pull_request",
-			"post_review_comment",
-			"create_agent",
-			"delete_agent",
-			"update_plan",
-		} {
-			if !slices.Contains(cfg.tools, ct) {
-				cfg.tools = append(cfg.tools, ct)
-			}
-		}
-		if agent.Spec.Coordination.Autonomous && !slices.Contains(cfg.tools, "request_approval") {
-			cfg.tools = append(cfg.tools, "request_approval")
+	}).EnvVars() {
+		switch envVar.Name {
+		case workerenv.AITemperature, workerenv.AIMaxTokens:
+			// Reserve omitted settings too, so Task env and Agent Secret EnvFrom
+			// cannot supply values outside the Agent's model configuration.
+			envVars = setControllerEnvValue(envVars, envVar.Name, envVar.Value)
+		default:
+			envVars = append(envVars, envVar)
 		}
 	}
 
-	// Auto-inject messaging tools for child tasks (tasks delegated by a coordinator)
-	// so they can communicate with sibling tasks via send_message/check_messages
-	_, isChildTask := task.Labels[labels.LabelParentTask]
-	if isChildTask && !disableCoordinationToolInjection {
-		for _, ct := range []string{"send_message", "check_messages"} {
-			if !slices.Contains(cfg.tools, ct) {
-				cfg.tools = append(cfg.tools, ct)
-			}
-		}
-	}
+	cfg.tools = aitools.Resolve(task, agent)
+	coordinationConfigured := agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled
 
 	if len(cfg.tools) > 0 {
 		envVars = setControllerEnvValue(envVars, workerenv.AITools, strings.Join(cfg.tools, ","))
 	}
 
-	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
+	if coordinationConfigured {
 		envVars = b.addCoordinationEnvVars(envVars, task, agent)
 	}
 
-	// Enable coordination in worker for child tasks so messaging tools are registered
-	if isChildTask && (agent == nil || agent.Spec.Coordination == nil || !agent.Spec.Coordination.Enabled) {
+	// Child identity enables the coordination registry even when implicit tool
+	// injection is disabled, so explicitly selected coordination tools resolve to
+	// the platform implementations rather than Tool CRs.
+	if aitools.RegistersCoordinationTools(task, agent) && !coordinationConfigured {
 		envVars = append(envVars, corev1.EnvVar{Name: workerenv.CoordinationEnabled, Value: scheduledRunLabelValue})
 	}
 
@@ -1677,7 +1664,7 @@ func sessionTranscriptMaxAttempts(promptIncluded bool, timeout *metav1.Duration)
 	attempts := 5
 	if promptIncluded {
 		// Required transcripts must keep retrying through the Task startup window.
-		// Worker authorization intentionally waits for controller-persisted JobName;
+		// Worker authorization waits for the controller-persisted Job name and UID;
 		// extending this retry budget preserves that security boundary without a
 		// pre-status identity fallback.
 		attempts = 300
